@@ -1,4 +1,6 @@
 #!/bin/sh /etc/rc.common
+# START and USE_PROCD are read by /etc/rc.common, not by this file.
+# shellcheck disable=SC2034
 # NSS offload data-plane bring-up, split around netifd.
 #
 # start_service (START=19, before netifd): make the data-path decision once
