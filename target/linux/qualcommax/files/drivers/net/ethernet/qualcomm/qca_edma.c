@@ -1093,6 +1093,7 @@ static netdev_tx_t edma_ndo_xmit(struct sk_buff *skb, struct net_device *netdev)
 			if (unlikely(!READ_ONCE(priv->dp_injectable[tag_info->port]))) {
 				rcu_read_unlock();
 				dev_kfree_skb_any(skb);
+				atomic64_inc(&priv->dp_tx_ungranted[tag_info->port]);
 				netdev->stats.tx_dropped++;
 				return NETDEV_TX_OK;
 			}
@@ -1209,9 +1210,24 @@ int qca_edma_port_dp_claim(struct net_device *conduit, unsigned int port,
 		kfree(rd);
 		ret = -EBUSY;
 	} else {
+		bool was_open = priv->dp_injectable[port];
+
+		/*
+		 * Publishing the owner while the port is still marked
+		 * injectable hands it conduit TX before the grant has told
+		 * the firmware the port is up, and the firmware discards
+		 * frames for a port it believes is down. Close the port
+		 * across the claim instead: until the owner is published the
+		 * frames still take the host path, after it they are dropped
+		 * and counted against the port, so at no point are they given
+		 * to an owner that cannot send them. Reopen only on a granted
+		 * claim, leaving a refused one to the next transition.
+		 */
+		if (was_open)
+			WRITE_ONCE(priv->dp_injectable[port], false);
 		rcu_assign_pointer(priv->dp_owner[port], rd);
-		if (priv->dp_injectable[port])
-			owner->grant(ctx);
+		if (was_open && !owner->grant(ctx))
+			WRITE_ONCE(priv->dp_injectable[port], true);
 	}
 	mutex_unlock(&edma_dp_lock);
 
@@ -1284,15 +1300,40 @@ void qca_edma_port_transition_end(struct net_device *conduit,
 
 	mutex_lock(&edma_dp_lock);
 	if (!priv->dp_injectable[port]) {
-		WRITE_ONCE(priv->dp_injectable[port], true);
 		rd = rcu_dereference_protected(priv->dp_owner[port],
 					       lockdep_is_held(&edma_dp_lock));
-		if (rd)
-			rd->ops->grant(rd->ctx);
+		/*
+		 * Only open the port once the owner confirms it can carry the
+		 * traffic, and leave the flag clear if it cannot. The flag is
+		 * the retry condition as much as the TX permission: setting
+		 * it before the grant, and keeping it set when the grant
+		 * failed, made every later transition skip the grant it was
+		 * supposed to repeat, so one refused grant stranded the port
+		 * until reboot.
+		 * Left clear, host TX for the port is dropped and counted
+		 * rather than silently handed to an owner that cannot send it,
+		 * and the next transition tries again.
+		 */
+		if (!rd || !rd->ops->grant(rd->ctx))
+			WRITE_ONCE(priv->dp_injectable[port], true);
 	}
 	mutex_unlock(&edma_dp_lock);
 }
 EXPORT_SYMBOL_GPL(qca_edma_port_transition_end);
+
+u64 qca_edma_port_dp_tx_ungranted(struct net_device *conduit, unsigned int port)
+{
+	struct edma_priv *priv;
+
+	if (!qca_edma_netdev_is_conduit(conduit) ||
+	    port > QCA_EDMA_DP_MAX_PORT)
+		return 0;
+
+	priv = netdev_priv(conduit);
+
+	return atomic64_read(&priv->dp_tx_ungranted[port]);
+}
+EXPORT_SYMBOL_GPL(qca_edma_port_dp_tx_ungranted);
 
 bool qca_edma_port_dp_injectable(struct net_device *conduit, unsigned int port)
 {

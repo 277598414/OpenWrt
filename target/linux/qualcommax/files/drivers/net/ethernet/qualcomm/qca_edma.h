@@ -258,6 +258,13 @@ struct edma_priv {
 
 	struct edma_dp_owner __rcu *dp_owner[QCA_EDMA_DP_MAX_PORT + 1];
 	bool dp_injectable[QCA_EDMA_DP_MAX_PORT + 1];
+	/*
+	 * Host frames refused because the port is not open for injection.
+	 * Counted per port: the conduit carries every port's traffic, so a
+	 * conduit-wide drop count cannot say which port lost them, and which
+	 * port lost them is the whole question when one goes quiet.
+	 */
+	atomic64_t dp_tx_ungranted[QCA_EDMA_DP_MAX_PORT + 1];
 
 	spinlock_t tx_lock;
 

@@ -31,10 +31,19 @@
 /* PPE port ids carried in the OOB tag; physical ports are 1..6 */
 #define QCA_EDMA_DP_MAX_PORT	7
 
+/*
+ * grant() returns 0 once the owner has the port back in a state where it can
+ * actually transmit. It has to be able to fail: the NSS owner grants by telling
+ * the firmware the port's link is up, and if the firmware does not take that,
+ * frames handed to the owner are discarded inside it with nothing to show for
+ * them. Marking the port injectable regardless is what turned a failed grant
+ * into a port that was dead until the next reboot while still reporting itself
+ * as healthy.
+ */
 struct qca_edma_dp_owner {
 	netdev_tx_t (*xmit)(struct sk_buff *skb, void *ctx);
 	void (*revoke)(void *ctx);
-	void (*grant)(void *ctx);
+	int (*grant)(void *ctx);
 };
 
 #if IS_REACHABLE(CONFIG_QCOM_EDMA)
@@ -48,6 +57,7 @@ void qca_edma_port_transition_begin(struct net_device *conduit,
 void qca_edma_port_transition_end(struct net_device *conduit,
 				  unsigned int port);
 bool qca_edma_port_dp_injectable(struct net_device *conduit, unsigned int port);
+u64 qca_edma_port_dp_tx_ungranted(struct net_device *conduit, unsigned int port);
 #else
 static inline bool qca_edma_netdev_is_conduit(const struct net_device *netdev)
 {
@@ -87,6 +97,12 @@ static inline bool qca_edma_port_dp_injectable(struct net_device *conduit,
 					       unsigned int port)
 {
 	return false;
+}
+
+static inline u64 qca_edma_port_dp_tx_ungranted(struct net_device *conduit,
+						unsigned int port)
+{
+	return 0;
 }
 #endif
 
