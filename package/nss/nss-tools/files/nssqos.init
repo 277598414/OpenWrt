@@ -1,4 +1,6 @@
 #!/bin/sh /etc/rc.common
+# START and USE_PROCD are read by /etc/rc.common, not by this file.
+# shellcheck disable=SC2034
 # NSS QoS marking: renders /etc/config/nssqos into a standalone nftables
 # table (inet nssqos, mangle-priority forward chain). Rules DSCP-mark
 # matching connections and optionally steer them into the SQM fast lane
