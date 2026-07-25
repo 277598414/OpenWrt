@@ -228,11 +228,15 @@ if [ "$L2" = 1 ]; then
 		tdr=$(echo "$line" | sed -n 's/.*tx_dropped=\([^ ]*\).*/\1/p')
 		rxf=$(echo "$line" | sed -n 's/.*rx_fw_pkts=\([^ ]*\).*/\1/p')
 		car=$(cat "$NET/$nd/carrier" 2>/dev/null)
+		# A failed devmem read must not swallow the column: every field in
+		# this row is width-aligned and read by eye, so an empty one shifts
+		# everything after it and silently renames the remaining numbers.
+		bmp=$(vsi_bmp "$vsi")
 		etx=$(cat "$edp/$pn"/* 2>/dev/null | awk '/tx_pkts/{print $3}')
 		erx=$(cat "$edp/$pn"/* 2>/dev/null | awk '/rx_pkts/{print $3}')
 		printf "  %-6s %-4s %-4s %-4s %-4s %-4s %-11s %12s %9s %9s %12s %12s %12s\n" \
 		       "$nd" "$pn" "${car:-?}" "${inj:-?}" "${fwl:-?}" "${vsi:-?}" \
-		       "$(vsi_bmp "$vsi")" "${txr:-?}" "${tbz:-?}" "${tdr:-?}" \
+		       "${bmp:-?}" "${txr:-?}" "${tbz:-?}" "${tdr:-?}" \
 		       "${rxf:-?}" "${etx:-?}" "${erx:-?}"
 	done
 	echo "  host->fw=glue tx_redirect  fw->host=glue rx_fw  wire->fw=edma ingress  fw->wire=edma egress"
