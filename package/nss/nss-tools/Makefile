@@ -26,7 +26,10 @@ define Package/nss-tools/description
  'nss' service running /usr/sbin/nss-up: firmware arm, bridge/multicast/
  ECM/PPPoE managers, Wi-Fi offload flip, SQM), reports its health via
  /usr/sbin/nss-status (-j for JSON) and captures EDMA/PPE registers with
- edma-dump (needs a devmem-enabled busybox). Nothing autoloads: disable
+ edma-dump (needs a devmem-enabled busybox). nss-wedge-watch dumps the
+ firmware, fabric and MAC state behind a port that has stopped
+ transmitting - '-1' for a one-shot capture on a box that is wedged now,
+ or run it detached to catch the next one. Nothing autoloads: disable
  with "uci set nss.general.enabled='0'" to stay on the plain host stack.
  Pulls in the complete NSS runtime package set.
 endef
@@ -86,6 +89,7 @@ define Package/nss-tools/install
 	$(INSTALL_BIN) ./files/nss-up $(1)/usr/sbin/nss-up
 	$(INSTALL_BIN) ./files/nss-status $(1)/usr/sbin/nss-status
 	$(INSTALL_BIN) ./files/edma-dump $(1)/usr/sbin/edma-dump
+	$(INSTALL_BIN) ./files/nss-wedge-watch $(1)/usr/sbin/nss-wedge-watch
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/nss.init $(1)/etc/init.d/nss
 	$(INSTALL_DIR) $(1)/lib/nss
@@ -94,6 +98,8 @@ define Package/nss-tools/install
 	$(INSTALL_DATA) ./files/nss.sysctl $(1)/etc/sysctl.d/12-nss-networking.conf
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_DATA) ./files/nss-offload.defaults $(1)/etc/uci-defaults/98-nss-offload
+	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
+	$(INSTALL_DATA) ./files/nss-tools.keep $(1)/lib/upgrade/keep.d/nss-tools
 endef
 
 define Package/nssqos/install

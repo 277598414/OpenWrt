@@ -1,0 +1,193 @@
+#!/bin/sh
+# nss-wedge-watch - catch a per-port NSS egress stall and capture the state that
+# names it. Two field captures of this fault dead-ended because the only thing
+# read at wedge time was the per-port packet count, which says a port is dead but
+# not why. This samples the same counters continuously and, the moment a port
+# goes egress-dead with the link still up, dumps every readout that discriminates
+# between the remaining causes - before anyone reboots.
+#
+# Detection: carrier up AND the firmware's fw->wire counter frozen AND the host
+# still handing frames to the firmware, for $HOLD consecutive samples.
+#
+# The port set comes from the live glue table, never a hardcoded range.
+
+GLUE=/sys/kernel/debug/qca-ppe-nss
+DRV=/sys/kernel/debug/qca-nss-drv
+NET=/sys/class/net
+PPE_BASE=0x3a000000
+INTERVAL="${INTERVAL:-5}"
+HOLD="${HOLD:-4}"
+# Default into the directory sysupgrade is told to keep (lib/upgrade/keep.d),
+# so a capture survives the flash that carries the fix for it.
+OUTDIR="${OUTDIR:-/root/auto-recovery}"
+
+[ -r "$GLUE/status" ] || { echo "nss-wedge-watch: NSS plane not armed" >&2; exit 1; }
+
+bootid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null | cut -c1-8)
+
+# field <line> <key>  -> value of key=value in an if_num line
+field() { echo "$1" | sed -n "s/.*$2=\([^ ]*\).*/\1/p"; }
+
+port_line() { grep "if_num $1:" "$GLUE/status" 2>/dev/null; }
+
+# firmware per-port egress / ingress (see nss-status: rx=fw->wire, tx=wire->fw)
+fw_egress()  { awk '/_rx_pkts/{print $3}' "$DRV/stats/edma/ports/$1/stats" 2>/dev/null; }
+fw_ingress() { awk '/_tx_pkts/{print $3}' "$DRV/stats/edma/ports/$1/stats" 2>/dev/null; }
+
+ports() { awk '/^if_num/ && !/netdev=-/ {sub(/:/,"",$2); print $2}' "$GLUE/status" 2>/dev/null; }
+
+reg() { devmem $(($1)) 32 2>/dev/null; }
+
+capture() {
+	pn="$1"; nd="$2"
+	mkdir -p "$OUTDIR"
+	seq=0
+	while [ -e "$OUTDIR/wedge-$bootid-$seq.txt" ]; do seq=$((seq+1)); done
+	out="$OUTDIR/wedge-$bootid-$seq.txt"
+	{
+	echo "=== nss-wedge-watch: port $pn ($nd) egress dead, link up ==="
+	date; uptime; echo "boot_id=$(cat /proc/sys/kernel/random/boot_id)"
+	echo
+	echo "--- glue ---"; cat "$GLUE/status"
+	echo
+	echo "--- nss-status ---"; nss-status 2>&1; nss-status -l2 2>&1
+	echo
+	# Whether the firmware ever saw the frames, and whether it dropped them on
+	# egress, is the single fact that splits a firmware-side stall from a fabric
+	# one. rx_queue[*]_drops are the egress drops and nothing was reading them.
+	echo "--- firmware EDMA: per-port stats + egress queue drops ---"
+	for p in $(ports); do
+		echo "## port $p"; cat "$DRV/stats/edma/ports/$p/stats" 2>/dev/null
+		cat "$DRV/stats/edma/ports/$p/ring_map" 2>/dev/null
+	done
+	echo "--- firmware EDMA: error stats ---"; cat "$DRV/stats/edma/err_stats" 2>/dev/null
+	echo "--- firmware EDMA: ring stats (tx / txcmpl) ---"
+	for r in "$DRV"/stats/edma/rings/tx/* "$DRV"/stats/edma/rings/txcmpl/*; do
+		[ -e "$r" ] && cat "$r" 2>/dev/null
+	done
+	echo
+	echo "--- firmware log ring ---"; cat "$DRV/logs/core0" 2>/dev/null
+	echo "--- firmware pbuf pools (n2h) ---"; cat "$DRV/stats/n2h" 2>/dev/null
+	echo
+	echo "--- PPE drop codes / punt reasons, per port ---"
+	for p in $(ports); do
+		echo "## port $p drop"; awk '$2=="=" && $3+0>0' "$DRV/stats/ppe/code/drop/$p" 2>/dev/null
+	done
+	cat "$DRV/stats/ppe/code/cpu/exception" 2>/dev/null
+	cat "$DRV/stats/ppe/code/cpu/non-exception" 2>/dev/null
+	echo
+	# The host writes these and then never touches them again, so if one is wrong
+	# at wedge time the firmware changed it underneath us - that is the whole
+	# dual-ownership question, and it has never been read on a wedged box.
+	echo "--- PPE per-port egress gates (host-owned, read back) ---"
+	echo "LPI_ENABLE        = $(reg $((PPE_BASE + 0x400)))   (0 = PPE-side 802.3az off, the healthy value)"
+	for p in $(ports); do
+		echo "port $p: PORT_BRIDGE_CTRL=$(reg $((PPE_BASE + 0x060300 + p * 4))) \
+CST_STATE=$(reg $((PPE_BASE + 0x060100 + p * 4))) \
+MRU_MTU_CTRL=$(reg $((PPE_BASE + 0x063000 + p * 0x10)))"
+	done
+	echo
+	# A stalled port that counts nothing is holding, not dropping, and the two
+	# things that hold a port are buffer-manager flow control and the queue
+	# admission ceiling. Neither counts a packet, so only these registers show
+	# it. PORT_FC_STATUS is read-only hardware state; a non-zero fc field on a
+	# port that cannot transmit is the answer.
+	echo "--- BM per-port flow control (fc != 0 on the dead port = the fabric is holding it) ---"
+	for p in $(ports); do
+		v=$(reg $((PPE_BASE + 0x600140 + p * 4)))
+		echo "port $p: PORT_FC_STATUS=$v fc=$(( (v >> 16) & 3 ))  \
+cfg_W0=$(reg $((PPE_BASE + 0x601000 + p * 0x10))) \
+cfg_W1=$(reg $((PPE_BASE + 0x601000 + p * 0x10 + 4)))  \
+FC_MODE=$(reg $((PPE_BASE + 0x600100 + p * 4)))"
+	done
+	echo
+	# Queue occupancy is instantaneous and reads 0 on a healthy box; a value
+	# pinned at the admission ceiling is a queue that is never drained. The
+	# port's queue base is read back out of the QM unicast map rather than
+	# assumed, so this works on any IPQ807x port layout.
+	echo "--- QM per-queue occupancy + scheduler map, per port (16 queues each) ---"
+	for p in $(ports); do
+		qb=$(( ($(reg $((PPE_BASE + 0x810000 + p * 0x10))) >> 4) & 0xff ))
+		echo "## port $p (queues $qb..$((qb + 15)))"
+		q=$qb
+		while [ $q -lt $((qb + 16)) ]; do
+			occ=$(reg $((PPE_BASE + 0x84e000 + q * 0x10)))
+			echo "   q$q occ=$(( occ & 4095 )) \
+AC_W0=$(reg $((PPE_BASE + 0x848000 + q * 0x10))) \
+L0_FLOW=$(reg $((PPE_BASE + 0x402000 + q * 0x10))) \
+L0_PORT=$(reg $((PPE_BASE + 0x408000 + q * 0x10)))"
+			q=$((q + 1))
+		done
+		echo "   L1_FLOW=$(reg $((PPE_BASE + 0x440000 + p * 0x10))) \
+L1_PORT=$(reg $((PPE_BASE + 0x446000 + p * 0x10)))"
+	done
+	echo
+	echo "--- per-port MAC MIB (hardware truth for what left the wire) ---"
+	for p in $(ports); do
+		n=$(field "$(port_line $p)" netdev)
+		[ -n "$n" ] && { echo "## $n"; ethtool -S "$n" 2>/dev/null; }
+	done
+	echo
+	echo "--- qdiscs ---"; tc -s qdisc show 2>/dev/null
+	echo "--- links ---"; ip -br link
+	echo "--- dmesg ---"; dmesg
+	echo "--- logread ---"; logread | tail -400
+	} > "$out" 2>&1
+	logger -t nss-wedge-watch "port $pn ($nd) egress dead - state captured in $out"
+	echo "$out"
+}
+
+# One-shot: capture right now, for someone sitting in front of a wedged box.
+# This is the mode to hand a reporter - it takes the same dump the watcher takes,
+# without needing the watcher to have been running beforehand.
+if [ "${1:-}" = "-1" ] || [ "${1:-}" = "--now" ]; then
+	pn="${2:-}"
+	if [ -z "$pn" ]; then
+		# Default to the port whose link is up and whose firmware egress is
+		# frozen across a short sample; failing that, just take the first
+		# link-up port so the dump still happens.
+		for p in $(ports); do
+			n=$(field "$(port_line $p)" netdev)
+			[ "$(cat "$NET/$n/carrier" 2>/dev/null)" = 1 ] || continue
+			a=$(fw_egress "$p"); sleep 2; b=$(fw_egress "$p")
+			[ "$a" = "$b" ] && { pn="$p"; break; }
+			[ -z "$pn" ] && pn="$p"
+		done
+	fi
+	[ -n "$pn" ] || { echo "nss-wedge-watch: no link-up port" >&2; exit 1; }
+	capture "$pn" "$(field "$(port_line $pn)" netdev)"
+	exit 0
+fi
+
+logger -t nss-wedge-watch "armed (interval ${INTERVAL}s, hold ${HOLD})"
+
+# per-port previous sample and frozen-run length, kept in shell vars addressed by
+# port number (busybox ash has no arrays).
+while :; do
+	for pn in $(ports); do
+		line=$(port_line "$pn")
+		nd=$(field "$line" netdev)
+		[ -n "$nd" ] && [ "$nd" != "-" ] || continue
+		[ "$(cat "$NET/$nd/carrier" 2>/dev/null)" = 1 ] || continue
+
+		eg=$(fw_egress "$pn"); htx=$(field "$line" tx_redirect_pkts)
+		[ -n "$eg" ] && [ -n "$htx" ] || continue
+
+		eval "peg=\${eg_$pn:-}" ; eval "phtx=\${htx_$pn:-}" ; eval "run=\${run_$pn:-0}"
+		if [ -n "$peg" ]; then
+			# egress frozen while the host is still feeding the firmware
+			if [ "$eg" = "$peg" ] && [ "$htx" -gt "$phtx" ]; then
+				run=$((run + 1))
+			else
+				run=0
+			fi
+		fi
+		eval "eg_$pn=\$eg" ; eval "htx_$pn=\$htx" ; eval "run_$pn=\$run"
+
+		if [ "$run" -ge "$HOLD" ]; then
+			capture "$pn" "$nd"
+			eval "run_$pn=0"
+		fi
+	done
+	sleep "$INTERVAL"
+done
