@@ -1399,6 +1399,17 @@ static void qca_ppe_get_stats64(struct dsa_switch *ds, int port,
 		       s->tx_window_errors;
 
 	s->collisions = qca_ppe_mib_read(priv, gmac, PPE_MIB_TXCOLLISIONS);
+
+	/*
+	 * The MIB counts what the MAC put on the wire, so it cannot see a frame
+	 * dropped on the way to it. Software drops live in the netdev's own
+	 * counters - notably every frame the NSS firmware data plane refuses,
+	 * which nss-drv counts here and reports to us as NETDEV_TX_OK - and
+	 * rebuilding the whole struct from the MIB erased them. Carry them over,
+	 * as the XGMAC path above already does via dev_get_tstats64().
+	 */
+	s->tx_dropped = dsa_to_port(ds, port)->user->stats.tx_dropped;
+	s->rx_dropped = dsa_to_port(ds, port)->user->stats.rx_dropped;
 }
 
 static void qca_ppe_port_stp_state_set(struct dsa_switch *ds, int port,
