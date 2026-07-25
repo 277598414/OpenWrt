@@ -1,4 +1,6 @@
 #!/bin/sh /etc/rc.common
+# START and USE_PROCD are read by /etc/rc.common, not by this file.
+# shellcheck disable=SC2034
 # Datapath recovery of last resort (see /usr/sbin/nss-recovery).
 # Disable with: uci set nss.recovery.enabled='0'; uci commit nss
 

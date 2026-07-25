@@ -4,11 +4,18 @@
 # -d/--debug appends a diagnostics snapshot (firmware EDMA/N2H counters,
 # ECM totals, recent NSS kernel messages). Read-only: safe to run at any time.
 
-. /lib/nss/functions.sh
+# Every path the report reads hangs off one prefix, empty on the router. Point
+# it at an unpacked support capture to read that box's state on a workstation,
+# which is also how the parsers are exercised without hardware.
+R="${NSS_STATUS_ROOT:-}"
 
-GLUE=/sys/kernel/debug/qca-ppe-nss
-DRV=/sys/kernel/debug/qca-nss-drv/stats
-ECM=/sys/kernel/debug/ecm
+. "$R/lib/nss/functions.sh"
+
+GLUE=$R/sys/kernel/debug/qca-ppe-nss
+DRV=$R/sys/kernel/debug/qca-nss-drv/stats
+ECM=$R/sys/kernel/debug/ecm
+NET=$R/sys/class/net
+MOD=$R/sys/module
 
 JSON=0
 DEBUG=0
@@ -19,7 +26,7 @@ case "$1" in
 	-l2) L2=1 ;;
 esac
 
-mod() { [ -d "/sys/module/$1" ] && echo 1 || echo 0; }
+mod() { [ -d "$MOD/$1" ] && echo 1 || echo 0; }
 
 # --- collect ---------------------------------------------------------------
 
@@ -74,8 +81,8 @@ ports=$(awk '/^if_num/ {
 # ifnum netdev started host_tx fw_rx tx_total rx_total tx_offl rx_offl tx_pct rx_pct
 ports=$(echo "$ports" | while read -r ifnum nd st htx frx; do
 	[ -n "$ifnum" ] || continue
-	ttx=$(cat "/sys/class/net/$nd/statistics/tx_packets" 2>/dev/null || echo 0)
-	trx=$(cat "/sys/class/net/$nd/statistics/rx_packets" 2>/dev/null || echo 0)
+	ttx=$(cat "$NET/$nd/statistics/tx_packets" 2>/dev/null || echo 0)
+	trx=$(cat "$NET/$nd/statistics/rx_packets" 2>/dev/null || echo 0)
 	echo "$ifnum $nd $st $htx $frx $ttx $trx" | LC_ALL=C awk '{
 		otx = $6 - $4; orx = $7 - $5
 		if (otx < 0) otx = 0
@@ -95,7 +102,7 @@ bridge_mgr=$(mod qca_nss_bridge_mgr)
 mcs=$(mod qca_mcs)
 pppoe_mgr=$(mod qca_nss_pppoe)
 
-wifi_offload=$(cat /sys/module/ath11k/parameters/nss_offload 2>/dev/null || echo -1)
+wifi_offload=$(cat "$MOD/ath11k/parameters/nss_offload" 2>/dev/null || echo -1)
 
 nss_sqm_section
 sqm_sec=$NSS_SQM_SEC
@@ -154,6 +161,8 @@ if [ "$JSON" = 1 ]; then
 	pjson=""
 	for line in $(echo "$ports" | tr ' ' ',' ); do
 		# line: ifnum,netdev,started,tx,rx
+		# Splitting is the point: one field per positional parameter.
+		# shellcheck disable=SC2046
 		set -- $(echo "$line" | tr ',' ' ')
 		[ -n "$1" ] || continue
 		pjson="$pjson{\"ifnum\":$1,\"netdev\":\"$2\",\"started\":$3,\"tx_host_pkts\":$4,\"rx_host_pkts\":$5,\"tx_total\":$6,\"rx_total\":$7,\"tx_offloaded\":$8,\"rx_offloaded\":$9,\"tx_offload_pct\":${10},\"rx_offload_pct\":${11}},"
@@ -192,7 +201,7 @@ fi
 # egress stall: a link-up port whose host->fw (glue tx_redirect) climbs while
 # the client stays unreachable is not putting frames on the wire.
 if [ "$L2" = 1 ]; then
-	edp=/sys/kernel/debug/qca-nss-drv/stats/edma/ports
+	edp=$DRV/edma/ports
 	# VSI table base (HPPE, SoC-wide on IPQ807x): PPE 0x3a000000 + L2 block
 	# 0x060000 + VSI_TBL 0x1800, 0x10 per VSI. Word0 holds the member and
 	# unknown-unicast/multicast/broadcast flood bitmaps: an emptied word0 on a
@@ -215,7 +224,7 @@ if [ "$L2" = 1 ]; then
 		txr=$(echo "$line" | sed -n 's/.*tx_redirect_pkts=\([^ ]*\).*/\1/p')
 		tbz=$(echo "$line" | sed -n 's/.*tx_busy=\([^ ]*\).*/\1/p')
 		rxf=$(echo "$line" | sed -n 's/.*rx_fw_pkts=\([^ ]*\).*/\1/p')
-		car=$(cat "/sys/class/net/$nd/carrier" 2>/dev/null)
+		car=$(cat "$NET/$nd/carrier" 2>/dev/null)
 		etx=$(cat "$edp/$pn"/* 2>/dev/null | awk '/tx_pkts/{print $3}')
 		erx=$(cat "$edp/$pn"/* 2>/dev/null | awk '/rx_pkts/{print $3}')
 		printf "  %-6s %-4s %-4s %-4s %-4s %-11s %12s %9s %12s %12s %12s\n" \

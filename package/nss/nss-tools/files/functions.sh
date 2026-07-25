@@ -1,4 +1,8 @@
 # Shared helpers for the NSS runtime scripts (nss-up, nss-status).
+#
+# The nss_* helpers return their results by setting NSS_* variables the
+# caller reads, so they are never used in this file.
+# shellcheck disable=SC2034
 
 # Firmware blob and version string. qca-nss0.bin is a symlink the firmware
 # hotplug creates on the first arm; on a freshly flashed image it does not
