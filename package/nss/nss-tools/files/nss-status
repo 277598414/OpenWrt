@@ -221,8 +221,9 @@ if [ "$L2" = 1 ]; then
 	vsi_bmp() { [ -n "$1" ] && [ "$1" -ge 0 ] 2>/dev/null &&
 		devmem $((0x3a061800 + $1 * 0x10)) 32 2>/dev/null; }
 	echo "NSS L2 per-port datapath:"
-	printf "  %-6s %-4s %-4s %-4s %-4s %-11s %12s %9s %12s %12s %12s\n" \
-	       port ifn car inj vsi vsi_bmp "host->fw" "hostbusy" "fw->host" "wire->fw" "fw->wire"
+	printf "  %-6s %-4s %-4s %-4s %-4s %-4s %-11s %12s %9s %9s %12s %12s %12s\n" \
+	       port ifn car inj fwl vsi vsi_bmp "host->fw" "hostbusy" "hostdrop" \
+	       "fw->host" "wire->fw" "fw->wire"
 	# Port set comes from the live glue table, never a hardcoded range: the
 	# WAN is port 2 on one board and port 6 on the next.
 	for pn in $(awk '/^if_num/ && !/netdev=-/ {sub(/:/,"",$2); print $2}' \
@@ -232,16 +233,18 @@ if [ "$L2" = 1 ]; then
 		[ -z "$nd" ] || [ "$nd" = "-" ] && continue
 		vsi=$(echo "$line" | sed -n 's/.*fw_vsi=\([^ ]*\).*/\1/p')
 		inj=$(echo "$line" | sed -n 's/.*injectable=\([^ ]*\).*/\1/p')
+		fwl=$(echo "$line" | sed -n 's/.*fw_link=\([^ ]*\).*/\1/p')
 		txr=$(echo "$line" | sed -n 's/.*tx_redirect_pkts=\([^ ]*\).*/\1/p')
 		tbz=$(echo "$line" | sed -n 's/.*tx_busy=\([^ ]*\).*/\1/p')
+		tdr=$(echo "$line" | sed -n 's/.*tx_dropped=\([^ ]*\).*/\1/p')
 		rxf=$(echo "$line" | sed -n 's/.*rx_fw_pkts=\([^ ]*\).*/\1/p')
 		car=$(cat "$NET/$nd/carrier" 2>/dev/null)
 		etx=$(cat "$edp/$pn"/* 2>/dev/null | awk '/tx_pkts/{print $3}')
 		erx=$(cat "$edp/$pn"/* 2>/dev/null | awk '/rx_pkts/{print $3}')
-		printf "  %-6s %-4s %-4s %-4s %-4s %-11s %12s %9s %12s %12s %12s\n" \
-		       "$nd" "$pn" "${car:-?}" "${inj:-?}" "${vsi:-?}" \
-		       "$(vsi_bmp "$vsi")" "${txr:-?}" "${tbz:-?}" "${rxf:-?}" \
-		       "${etx:-?}" "${erx:-?}"
+		printf "  %-6s %-4s %-4s %-4s %-4s %-4s %-11s %12s %9s %9s %12s %12s %12s\n" \
+		       "$nd" "$pn" "${car:-?}" "${inj:-?}" "${fwl:-?}" "${vsi:-?}" \
+		       "$(vsi_bmp "$vsi")" "${txr:-?}" "${tbz:-?}" "${tdr:-?}" \
+		       "${rxf:-?}" "${etx:-?}" "${erx:-?}"
 	done
 	echo "  host->fw=glue tx_redirect  fw->host=glue rx_fw  wire->fw=edma ingress  fw->wire=edma egress"
 	echo "  link-up + host->fw climbing + client unreachable => egress stall (see /root/auto-recovery)"
@@ -249,6 +252,10 @@ if [ "$L2" = 1 ]; then
 	echo "    inj=0            host TX is dropped before the firmware - the port never got its"
 	echo "                     injection grant back after a transition"
 	echo "    hostbusy rising  the firmware stopped draining the host->fw ring"
+	echo "    fwl=0            we last told the firmware this port's link is DOWN, so it"
+	echo "                     will not transmit on it; a missed grant on our side"
+	echo "    hostdrop rising  nss-drv refused the frames before the firmware ever saw"
+	echo "                     them; host->fw counts those as sent, so read it here"
 	echo "    host->fw rising  frames reach the firmware and die past it (fabric/egress side);"
 	echo "                     an emptied vsi_bmp there means the flood masks were lost"
 

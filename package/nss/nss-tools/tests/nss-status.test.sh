@@ -38,7 +38,7 @@ port_fmt="$(sed -n 's/.*"\(if_num %d: netdev=[^"]*\)\\n".*/\1/p' "$glue_src")"
 
 port_keys="$(printf '%s\n' "$port_fmt" | tr ' ' '\n' | sed -n 's/^\([a-z_]*\)=%.*/\1/p')"
 for want_key in netdev armed overridden started fw_vsi tx_redirect_pkts \
-		tx_busy rx_fw_pkts; do
+		tx_busy tx_dropped fw_link rx_fw_pkts; do
 	printf '%s\n' "$port_keys" | grep -qx "$want_key" ||
 		{ echo "FAIL  driver no longer prints $want_key"; exit 1; }
 done
@@ -57,6 +57,11 @@ port_line() { # port_line <ifnum> <netdev> <started> <tx_redirect> <rx_fw>
 		tx_redirect_pkts) out="$out tx_redirect_pkts=$4" ;;
 		rx_fw_pkts)       out="$out rx_fw_pkts=$5" ;;
 		fw_vsi)           out="$out fw_vsi=7" ;;
+		# Distinct from tx_busy, which sits next to it: the whole point of
+		# this counter is that it disagrees with tx_redirect_pkts, so a
+		# reader that picked up either neighbour has to fail here.
+		tx_dropped)       out="$out tx_dropped=9" ;;
+		fw_link)          out="$out fw_link=1" ;;
 		*)                out="$out $k=3" ;;
 		esac
 	done
@@ -213,5 +218,38 @@ else
 	check 'sqm: a root with a default leaf is not' \
 		0 "$(run | grep -c 'dropping')"
 fi
+
+# ---- the L2 per-port view --------------------------------------------------
+# host->fw counts frames handed to nss-drv, which reports a silent drop as a
+# successful transmit, so the drop counter beside it is the only thing that
+# separates "the firmware took these" from "the firmware refused every one".
+# Two field captures of a dead WAN were unreadable for want of exactly this.
+
+stub devmem 'echo 0x05050505'
+for p in 2 3; do
+	mkdir -p "$drv/edma/ports/$p"
+	printf '\tedma_port[%s]_rx_pkts = 111%s\n\tedma_port[%s]_tx_pkts = 222%s\n' \
+		"$p" "$p" "$p" "$p" > "$drv/edma/ports/$p/stats"
+done
+
+# Resolve the column from the header rather than counting it. A positional
+# read is exactly what this file exists to catch, and adding the fw_link
+# column broke a first draft of these three checks that had counted.
+l2_field() { # l2_field <port> <column header>
+	run -l2 | awk -v want="$2" -v port="$1" '
+		$1 == "port" { for (i = 1; i <= NF; i++) if ($i == want) col = i; next }
+		$1 == port && col { print $col }'
+}
+
+check 'l2: hostdrop reports the drop counter, not a neighbouring field' \
+	9 "$(l2_field wan hostdrop)"
+check 'l2: host->fw is still the redirect counter beside it' \
+	250 "$(l2_field wan 'host->fw')"
+check 'l2: fw->wire is the firmware egress counter, not its ingress twin' \
+	1112 "$(l2_field wan 'fw->wire')"
+check 'l2: wire->fw is the ingress counter' \
+	2222 "$(l2_field wan 'wire->fw')"
+check 'l2: fwl reports the firmware link state we last set' \
+	1 "$(l2_field wan fwl)"
 
 exit "$fail"

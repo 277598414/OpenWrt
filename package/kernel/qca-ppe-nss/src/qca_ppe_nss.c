@@ -87,6 +87,18 @@ struct ppe_nss_port {
 	atomic64_t tx_redirect_pkts;
 	atomic64_t tx_busy;
 	atomic64_t rx_fw_pkts;
+	/*
+	 * What we last told the firmware about this port's link, and whether it
+	 * took it. The firmware's own idea of a port's link state is not
+	 * readable anywhere - there is no gmac/phys_if stats node on ipq807x -
+	 * and it is only ever a shadow of our revoke/grant edges, so a port that
+	 * is dead while this says "up, no error" puts the divergence inside the
+	 * firmware, and one that says "down" names a missed edge on our side.
+	 * Without this a wedged port cannot be attributed to either.
+	 */
+	u8 fw_link_up;
+	u8 fw_link_failed;
+	atomic_t fw_link_changes;
 };
 
 static struct ppe_nss_port ppe_nss_ports[NSS_DP_MAX_INTERFACES];
@@ -193,20 +205,27 @@ static netdev_tx_t ppe_nss_fw_xmit(struct sk_buff *skb, void *ctx)
  * port is already suspended/resumed by the driver itself. Must not
  * call back into the claim/release API or take ppe_nss_lock.
  */
+static void ppe_nss_fw_link_state(struct ppe_nss_port *port, bool up)
+{
+	int err = port->dp_ops->link_state(port->dpc, up ? 1 : 0);
+
+	if (err)
+		netdev_warn(port->netdev, "qca-ppe-nss: fw link %s notify failed\n",
+			    up ? "up" : "down");
+
+	port->fw_link_up = up;
+	port->fw_link_failed = !!err;
+	atomic_inc(&port->fw_link_changes);
+}
+
 static void ppe_nss_fw_revoke(void *ctx)
 {
-	struct ppe_nss_port *port = ctx;
-
-	if (port->dp_ops->link_state(port->dpc, 0))
-		netdev_warn(port->netdev, "qca-ppe-nss: fw link down notify failed\n");
+	ppe_nss_fw_link_state(ctx, false);
 }
 
 static void ppe_nss_fw_grant(void *ctx)
 {
-	struct ppe_nss_port *port = ctx;
-
-	if (port->dp_ops->link_state(port->dpc, 1))
-		netdev_warn(port->netdev, "qca-ppe-nss: fw link up notify failed\n");
+	ppe_nss_fw_link_state(ctx, true);
 }
 
 static const struct qca_edma_dp_owner ppe_nss_dp_owner = {
@@ -317,8 +336,7 @@ static void ppe_nss_port_unwind(struct ppe_nss_port *port,
 		qca_edma_port_dp_release(port->conduit, port->if_num);
 
 		if (fw_alive) {
-			if (port->dp_ops->link_state(port->dpc, 0))
-				netdev_warn(port->netdev, "qca-ppe-nss: fw link down notify failed\n");
+			ppe_nss_fw_link_state(port, false);
 
 			if (port->fw_vsi >= 0 && port->dp_ops->vsi_unassign &&
 			    port->dp_ops->vsi_unassign(port->dpc, port->fw_vsi))
@@ -913,8 +931,17 @@ static int ppe_nss_status_show(struct seq_file *m, void *v)
 	for (i = NSS_DP_START_IFNUM; i < NSS_DP_MAX_INTERFACES; i++) {
 		struct ppe_nss_port *port = &ppe_nss_ports[i];
 
+		/*
+		 * tx_redirect_pkts counts what we handed to nss-drv, not what
+		 * the firmware took: nss-drv returns NETDEV_TX_OK for every
+		 * failure except a full queue, so a port whose frames are all
+		 * being refused still reads as if it were transmitting. It
+		 * counts those refusals in the netdev's tx_dropped, so report
+		 * that next to it - the difference is what actually reached the
+		 * firmware, and without it a wedged port is unreadable here.
+		 */
 		seq_printf(m,
-			   "if_num %d: netdev=%s armed=%d overridden=%d started=%d injectable=%d fw_vsi=%d tx_redirect_pkts=%lld tx_busy=%lld rx_fw_pkts=%lld\n",
+			   "if_num %d: netdev=%s armed=%d overridden=%d started=%d injectable=%d fw_link=%d fw_link_failed=%d fw_link_changes=%d fw_vsi=%d tx_redirect_pkts=%lld tx_dropped=%lu tx_busy=%lld rx_fw_pkts=%lld\n",
 			   i,
 			   port->netdev ? netdev_name(port->netdev) : "-",
 			   port->state >= PPE_NSS_PORT_ARMED,
@@ -923,8 +950,12 @@ static int ppe_nss_status_show(struct seq_file *m, void *v)
 			   port->state == PPE_NSS_PORT_STARTED &&
 			   qca_edma_port_dp_injectable(port->conduit,
 						      port->if_num),
+			   port->fw_link_up,
+			   port->fw_link_failed,
+			   atomic_read(&port->fw_link_changes),
 			   port->fw_vsi,
 			   (long long)atomic64_read(&port->tx_redirect_pkts),
+			   port->netdev ? port->netdev->stats.tx_dropped : 0UL,
 			   (long long)atomic64_read(&port->tx_busy),
 			   (long long)atomic64_read(&port->rx_fw_pkts));
 	}
