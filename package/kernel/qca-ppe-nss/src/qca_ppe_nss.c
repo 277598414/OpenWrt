@@ -99,6 +99,7 @@ struct ppe_nss_port {
 	u8 fw_link_up;
 	u8 fw_link_failed;
 	atomic_t fw_link_changes;
+	atomic_t fw_link_skipped;
 };
 
 static struct ppe_nss_port ppe_nss_ports[NSS_DP_MAX_INTERFACES];
@@ -207,7 +208,27 @@ static netdev_tx_t ppe_nss_fw_xmit(struct sk_buff *skb, void *ctx)
  */
 static int ppe_nss_fw_link_state(struct ppe_nss_port *port, bool up)
 {
-	int err = port->dp_ops->link_state(port->dpc, up ? 1 : 0);
+	int err;
+
+	/*
+	 * The firmware's view of a port changes only when we change it, so a
+	 * notification restating what it already acknowledged buys nothing and
+	 * costs a synchronous round trip in a path held under rtnl. Skip it -
+	 * unless the last attempt failed, which leaves its view unknown and the
+	 * next attempt obliged to find out.
+	 *
+	 * This is the discipline nss-dp applies to the same firmware call: it
+	 * keeps a link-state shadow and returns early unless the state actually
+	 * differs (nss_dp_main.c, nss_dp_adjust_link). Driving the call from
+	 * every port transition instead of every link change is why this stack
+	 * issued several times as many of them.
+	 */
+	if (port->fw_link_up == up && !port->fw_link_failed) {
+		atomic_inc(&port->fw_link_skipped);
+		return 0;
+	}
+
+	err = port->dp_ops->link_state(port->dpc, up ? 1 : 0);
 
 	if (err)
 		netdev_warn(port->netdev, "qca-ppe-nss: fw link %s notify failed\n",
@@ -303,6 +324,13 @@ static int ppe_nss_port_start(struct ppe_nss_port *port)
 		goto err_vsi;
 	}
 
+	/*
+	 * A freshly opened firmware interface starts with its link down, so the
+	 * shadow has to say so - otherwise the grant that follows would be
+	 * skipped as redundant and the port would never be told it is up.
+	 */
+	port->fw_link_up = false;
+	port->fw_link_failed = 0;
 
 	ret = qca_edma_port_dp_claim(port->conduit, port->if_num,
 				     &ppe_nss_dp_owner, port);
@@ -920,7 +948,7 @@ static int ppe_nss_status_show(struct seq_file *m, void *v)
 		 * firmware, and without it a wedged port is unreadable here.
 		 */
 		seq_printf(m,
-			   "if_num %d: netdev=%s armed=%d overridden=%d started=%d injectable=%d fw_link=%d fw_link_failed=%d fw_link_changes=%d fw_vsi=%d tx_redirect_pkts=%lld tx_dropped=%lu tx_ungranted=%llu tx_busy=%lld rx_fw_pkts=%lld\n",
+			   "if_num %d: netdev=%s armed=%d overridden=%d started=%d injectable=%d fw_link=%d fw_link_failed=%d fw_link_changes=%d fw_link_skipped=%d fw_vsi=%d tx_redirect_pkts=%lld tx_dropped=%lu tx_ungranted=%llu tx_busy=%lld rx_fw_pkts=%lld\n",
 			   i,
 			   port->netdev ? netdev_name(port->netdev) : "-",
 			   port->state >= PPE_NSS_PORT_ARMED,
@@ -932,6 +960,7 @@ static int ppe_nss_status_show(struct seq_file *m, void *v)
 			   port->fw_link_up,
 			   port->fw_link_failed,
 			   atomic_read(&port->fw_link_changes),
+			   atomic_read(&port->fw_link_skipped),
 			   port->fw_vsi,
 			   (long long)atomic64_read(&port->tx_redirect_pkts),
 			   port->netdev ? port->netdev->stats.tx_dropped : 0UL,
