@@ -38,7 +38,7 @@ port_fmt="$(sed -n 's/.*"\(if_num %d: netdev=[^"]*\)\\n".*/\1/p' "$glue_src")"
 
 port_keys="$(printf '%s\n' "$port_fmt" | tr ' ' '\n' | sed -n 's/^\([a-z_]*\)=%.*/\1/p')"
 for want_key in netdev armed overridden started fw_vsi tx_redirect_pkts \
-		tx_busy tx_dropped fw_link rx_fw_pkts; do
+		tx_busy tx_dropped tx_ungranted fw_link rx_fw_pkts; do
 	printf '%s\n' "$port_keys" | grep -qx "$want_key" ||
 		{ echo "FAIL  driver no longer prints $want_key"; exit 1; }
 done
@@ -62,6 +62,7 @@ port_line() { # port_line <ifnum> <netdev> <started> <tx_redirect> <rx_fw>
 		# reader that picked up either neighbour has to fail here.
 		tx_dropped)       out="$out tx_dropped=9" ;;
 		fw_link)          out="$out fw_link=1" ;;
+		tx_ungranted)     out="$out tx_ungranted=11" ;;
 		*)                out="$out $k=3" ;;
 		esac
 	done

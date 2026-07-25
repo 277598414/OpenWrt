@@ -205,7 +205,7 @@ static netdev_tx_t ppe_nss_fw_xmit(struct sk_buff *skb, void *ctx)
  * port is already suspended/resumed by the driver itself. Must not
  * call back into the claim/release API or take ppe_nss_lock.
  */
-static void ppe_nss_fw_link_state(struct ppe_nss_port *port, bool up)
+static int ppe_nss_fw_link_state(struct ppe_nss_port *port, bool up)
 {
 	int err = port->dp_ops->link_state(port->dpc, up ? 1 : 0);
 
@@ -213,9 +213,18 @@ static void ppe_nss_fw_link_state(struct ppe_nss_port *port, bool up)
 		netdev_warn(port->netdev, "qca-ppe-nss: fw link %s notify failed\n",
 			    up ? "up" : "down");
 
-	port->fw_link_up = up;
+	/*
+	 * Track what the firmware acknowledged, not what we asked of it. A
+	 * refused notify leaves the firmware's idea of the port unchanged, and
+	 * recording our intent instead would assert a link the firmware will
+	 * not transmit on.
+	 */
+	if (!err)
+		port->fw_link_up = up;
 	port->fw_link_failed = !!err;
 	atomic_inc(&port->fw_link_changes);
+
+	return err;
 }
 
 static void ppe_nss_fw_revoke(void *ctx)
@@ -223,9 +232,9 @@ static void ppe_nss_fw_revoke(void *ctx)
 	ppe_nss_fw_link_state(ctx, false);
 }
 
-static void ppe_nss_fw_grant(void *ctx)
+static int ppe_nss_fw_grant(void *ctx)
 {
-	ppe_nss_fw_link_state(ctx, true);
+	return ppe_nss_fw_link_state(ctx, true);
 }
 
 static const struct qca_edma_dp_owner ppe_nss_dp_owner = {
@@ -293,6 +302,7 @@ static int ppe_nss_port_start(struct ppe_nss_port *port)
 		netdev_warn(netdev, "qca-ppe-nss: fw open failed\n");
 		goto err_vsi;
 	}
+
 
 	ret = qca_edma_port_dp_claim(port->conduit, port->if_num,
 				     &ppe_nss_dp_owner, port);
@@ -910,7 +920,7 @@ static int ppe_nss_status_show(struct seq_file *m, void *v)
 		 * firmware, and without it a wedged port is unreadable here.
 		 */
 		seq_printf(m,
-			   "if_num %d: netdev=%s armed=%d overridden=%d started=%d injectable=%d fw_link=%d fw_link_failed=%d fw_link_changes=%d fw_vsi=%d tx_redirect_pkts=%lld tx_dropped=%lu tx_busy=%lld rx_fw_pkts=%lld\n",
+			   "if_num %d: netdev=%s armed=%d overridden=%d started=%d injectable=%d fw_link=%d fw_link_failed=%d fw_link_changes=%d fw_vsi=%d tx_redirect_pkts=%lld tx_dropped=%lu tx_ungranted=%llu tx_busy=%lld rx_fw_pkts=%lld\n",
 			   i,
 			   port->netdev ? netdev_name(port->netdev) : "-",
 			   port->state >= PPE_NSS_PORT_ARMED,
@@ -925,6 +935,8 @@ static int ppe_nss_status_show(struct seq_file *m, void *v)
 			   port->fw_vsi,
 			   (long long)atomic64_read(&port->tx_redirect_pkts),
 			   port->netdev ? port->netdev->stats.tx_dropped : 0UL,
+			   qca_edma_port_dp_tx_ungranted(port->conduit,
+							 port->if_num),
 			   (long long)atomic64_read(&port->tx_busy),
 			   (long long)atomic64_read(&port->rx_fw_pkts));
 	}
