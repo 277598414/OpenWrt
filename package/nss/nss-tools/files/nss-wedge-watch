@@ -173,8 +173,11 @@ while :; do
 		eg=$(fw_egress "$pn"); htx=$(field "$line" tx_redirect_pkts)
 		[ -n "$eg" ] && [ -n "$htx" ] || continue
 
-		eval "peg=\${eg_$pn:-}" ; eval "phtx=\${htx_$pn:-}" ; eval "run=\${run_$pn:-0}"
-		if [ -n "$peg" ]; then
+		peg=""; phtx=""; run=0
+		eval "peg=\${eg_$pn:-}"
+		eval "phtx=\${htx_$pn:-}"
+		eval "run=\${run_$pn:-0}"
+		if [ -n "$peg" ] && [ -n "$phtx" ]; then
 			# egress frozen while the host is still feeding the firmware
 			if [ "$eg" = "$peg" ] && [ "$htx" -gt "$phtx" ]; then
 				run=$((run + 1))
