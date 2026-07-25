@@ -45,6 +45,12 @@ capture_and_reboot() {
 	logger -t nss-recovery "RECOVERY REBOOT: $reason (capture in $d)"
 	{ echo "reason: $reason"; date; uptime; } > "$d/reason.txt"
 	nss-status -d > "$d/nss-status.txt" 2>&1
+	# The reason this fired is a port that stopped transmitting, and none of
+	# the readouts below can say why: the firmware's per-port egress
+	# accounting, the fabric's own hold/drop state and the MAC MIB are what
+	# separate the remaining causes, and they die with the reboot. Take them
+	# while the box is still in the failed state.
+	OUTDIR="$d" nss-wedge-watch -1 >/dev/null 2>&1
 	dmesg > "$d/dmesg.txt" 2>&1
 	logread | tail -300 > "$d/logread.txt" 2>&1
 	cat "$GLUE/status" > "$d/glue-status.txt" 2>&1
