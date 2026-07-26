@@ -2,6 +2,7 @@
 
 #include <linux/delay.h>
 #include <linux/clk.h>
+#include <linux/debugfs.h>
 #include <linux/module.h>
 #include <linux/of_device.h>
 #include <linux/of_net.h>
@@ -12,6 +13,7 @@
 #include <linux/platform_device.h>
 #include <linux/reset.h>
 #include <linux/rtnetlink.h>
+#include <linux/seq_file.h>
 #include <linux/if_bridge.h>
 #include <linux/etherdevice.h>
 #include <linux/slab.h>
@@ -1758,6 +1760,145 @@ static const struct regmap_config ppe_regmap_cfg = {
 	.val_bits = 32,
 };
 
+/*
+ * Aquantia AQR system-interface registers. The PHY driver keeps its header
+ * private, so the handful needed to see how the AQR has configured the side
+ * facing this MAC are repeated here; the values match
+ * drivers/net/phy/aquantia/aquantia.h.
+ */
+#define AQR_PHYXS_VEND_IF_STATUS	0xe812
+#define   AQR_IF_STATUS_TYPE		GENMASK(7, 3)
+#define AQR_VEND1_GLOBAL_FW_ID		0x0020
+#define   AQR_FW_ID_MAJOR		GENMASK(15, 8)
+#define   AQR_FW_ID_MINOR		GENMASK(7, 0)
+#define   AQR_CFG_SERDES_MODE		GENMASK(2, 0)
+#define   AQR_CFG_AUTONEG_ENA		BIT(3)
+#define   AQR_CFG_RATE_ADAPT		GENMASK(8, 7)
+
+static const char *aqr_if_type_name(unsigned int type)
+{
+	switch (type) {
+	case 0:		return "KR";
+	case 1:		return "KX";
+	case 2:		return "XFI";
+	case 3:		return "USXGMII";
+	case 4:		return "XAUI";
+	case 6:		return "SGMII";
+	case 7:		return "RXAUI";
+	case 9:		return "off";
+	case 10:	return "OCSGMII";
+	default:	return "unknown";
+	}
+}
+
+static const char *aqr_serdes_mode_name(unsigned int mode)
+{
+	switch (mode) {
+	case 0:		return "XFI";
+	case 3:		return "SGMII";
+	case 4:		return "OCSGMII";
+	case 6:		return "XFI5G";
+	default:	return "unknown";
+	}
+}
+
+static const char *aqr_rate_adapt_name(unsigned int ra)
+{
+	switch (ra) {
+	case 0:		return "none";
+	case 1:		return "USX";
+	case 2:		return "pause";
+	default:	return "unknown";
+	}
+}
+
+static const struct {
+	const char *name;
+	u16 reg;
+} aqr_speed_cfg[] = {
+	{ "10M",	0x0310 },
+	{ "100M",	0x031b },
+	{ "1G",		0x031c },
+	{ "2.5G",	0x031d },
+	{ "5G",		0x031e },
+	{ "10G",	0x031f },
+};
+
+static void qca_ppe_phy_dump(struct seq_file *s, struct phy_device *phy)
+{
+	int val, i;
+
+	val = phy_read_mmd(phy, MDIO_MMD_VEND1, AQR_VEND1_GLOBAL_FW_ID);
+	if (val < 0) {
+		seq_printf(s, "  firmware       read failed (%d)\n", val);
+		return;
+	}
+	seq_printf(s, "  firmware       %u.%u%s\n",
+		   (unsigned int)FIELD_GET(AQR_FW_ID_MAJOR, val),
+		   (unsigned int)FIELD_GET(AQR_FW_ID_MINOR, val),
+		   val ? "" : "   (none loaded)");
+
+	val = phy_read_mmd(phy, MDIO_MMD_PHYXS, AQR_PHYXS_VEND_IF_STATUS);
+	if (val >= 0)
+		seq_printf(s, "  IF_STATUS      0x%04x  system interface in use: %s\n",
+			   val,
+			   aqr_if_type_name(FIELD_GET(AQR_IF_STATUS_TYPE, val)));
+
+	seq_puts(s, "  system interface provisioned per line rate:\n");
+	for (i = 0; i < ARRAY_SIZE(aqr_speed_cfg); i++) {
+		val = phy_read_mmd(phy, MDIO_MMD_VEND1, aqr_speed_cfg[i].reg);
+		if (val < 0)
+			continue;
+
+		seq_printf(s, "    %-5s 0x%04x  serdes=%-7s rate_adapt=%-5s autoneg=%u\n",
+			   aqr_speed_cfg[i].name, val,
+			   aqr_serdes_mode_name(FIELD_GET(AQR_CFG_SERDES_MODE, val)),
+			   aqr_rate_adapt_name(FIELD_GET(AQR_CFG_RATE_ADAPT, val)),
+			   !!(val & AQR_CFG_AUTONEG_ENA));
+	}
+}
+
+static int qca_ppe_phy_show(struct seq_file *s, void *unused)
+{
+	struct qca_ppe_priv *priv = s->private;
+	struct dsa_switch *ds = &priv->ds;
+	int port;
+
+	for (port = 0; port < ds->num_ports; port++) {
+		struct net_device *user;
+		struct phy_device *phy;
+
+		/* dsa_port.user shares a union with .conduit */
+		if (!dsa_is_user_port(ds, port))
+			continue;
+
+		user = dsa_to_port(ds, port)->user;
+		if (!user)
+			continue;
+
+		phy = user->phydev;
+		if (!phy)
+			continue;
+
+		seq_printf(s, "%s (port %d)  PHY %s  driver %s  link %s\n",
+			   user->name, port, phydev_name(phy),
+			   phy->drv ? phy->drv->name : "none",
+			   phy->link ? "up" : "down");
+
+		/* The vendor registers below are Clause 45 and AQR specific. */
+		if (phy->is_c45)
+			qca_ppe_phy_dump(s, phy);
+	}
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(qca_ppe_phy);
+
+static void qca_ppe_debugfs_remove(void *data)
+{
+	debugfs_remove_recursive(data);
+}
+
 static int qca_ppe_probe(struct platform_device *pdev)
 {
 	const struct ppe_data *data;
@@ -1765,6 +1906,7 @@ static int qca_ppe_probe(struct platform_device *pdev)
 	struct qca_ppe_priv *priv;
 	struct reset_control *rst;
 	struct dsa_switch *ds;
+	struct dentry *dbg_dir;
 	void __iomem *base;
 	int ret, i;
 
@@ -1866,6 +2008,13 @@ static int qca_ppe_probe(struct platform_device *pdev)
 	/* Best-effort: a failed wq just disables deferred FDB flush. */
 	qca_ppe_wq = alloc_workqueue("qca_ppe_fdb", 0, 0);
 	qca_ppe_instance = priv;
+
+	dbg_dir = debugfs_create_dir(dev_name(&pdev->dev), NULL);
+	debugfs_create_file("phy", 0400, dbg_dir, priv, &qca_ppe_phy_fops);
+	ret = devm_add_action_or_reset(&pdev->dev, qca_ppe_debugfs_remove,
+				       dbg_dir);
+	if (ret)
+		goto err_clk;
 
 	return 0;
 

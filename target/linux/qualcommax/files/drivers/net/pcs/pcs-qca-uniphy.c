@@ -12,6 +12,7 @@
 #include <linux/bitfield.h>
 #include <linux/clk/clk-conf.h>
 #include <linux/clk-provider.h>
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/iopoll.h>
@@ -23,6 +24,7 @@
 #include <linux/phylink.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
+#include <linux/seq_file.h>
 
 #include <dt-bindings/net/qca-uniphy.h>
 
@@ -621,9 +623,18 @@ static int qca_uniphy_pcs_config_usxgmii(struct phylink_pcs *pcs,
 	if (ret)
 		return ret;
 
+	/*
+	 * Only run USXGMII autonegotiation when phylink has actually asked for
+	 * in-band signalling. On a PHY managed link phylink calls
+	 * phy_config_inband(LINK_INBAND_DISABLE), so the PHY stops sending code
+	 * words; enabling AN here regardless of neg_mode leaves the XPCS waiting
+	 * for words that never arrive, and the datapath never opens even though
+	 * the SerDes trains and the receiver reaches block lock.
+	 */
 	return regmap_update_bits(uniphy->regmap, XPCS_MII_CTRL,
 				  XPCS_MII_AN_EN,
-				  interface == PHY_INTERFACE_MODE_USXGMII ? XPCS_MII_AN_EN : 0);
+				  neg_mode == PHYLINK_PCS_NEG_INBAND_ENABLED ?
+				  XPCS_MII_AN_EN : 0);
 }
 
 static int qca_uniphy_pcs_config(struct phylink_pcs *pcs,
@@ -931,12 +942,115 @@ static const struct regmap_config uniphy_regmap_cfg = {
 	.fast_io = true,
 };
 
+static const char *qca_uniphy_speed_name(unsigned int mii_ctrl)
+{
+	switch (mii_ctrl & XPCS_SPEED_MASK) {
+	case XPCS_SPEED_10000:	return "10G";
+	case XPCS_SPEED_5000:	return "5G";
+	case XPCS_SPEED_2500:	return "2.5G";
+	case XPCS_SPEED_1000:	return "1G";
+	case XPCS_SPEED_100:	return "100M";
+	case XPCS_SPEED_10:	return "10M";
+	default:		return "unknown";
+	}
+}
+
+static int qca_uniphy_status_show(struct seq_file *s, void *unused)
+{
+	struct qca_uniphy *uniphy = s->private;
+	unsigned int mode_ctrl;
+	unsigned int v;
+	int ch;
+
+	seq_printf(s, "interface        %s\n", phy_modes(uniphy->interface));
+
+	regmap_read(uniphy->regmap, UNIPHY_MODE_CTRL, &mode_ctrl);
+	seq_printf(s, "MODE_CTRL        0x%08x  xpcs=%u sgmii=%u sgmii_plus=%u\n",
+		   mode_ctrl, !!(mode_ctrl & UNIPHY_XPCS_MODE),
+		   !!(mode_ctrl & UNIPHY_SGMII_MODE),
+		   !!(mode_ctrl & UNIPHY_SGPLUS_MODE));
+
+	regmap_read(uniphy->regmap, UNIPHY_OFFSET_CALIB_4, &v);
+	seq_printf(s, "CALIB_4          0x%08x  calibration_done=%u\n",
+		   v, !!(v & UNIPHY_CALIBRATION_DONE));
+
+	regmap_read(uniphy->regmap, UNIPHY_MISC2_PHY_MODE, &v);
+	seq_printf(s, "MISC2_PHY_MODE   0x%08x\n", v);
+
+	for (ch = 0; ch < QCA_UNIPHY_CHANNELS; ch++) {
+		regmap_read(uniphy->regmap, UNIPHY_CH_STS(ch), &v);
+		seq_printf(s, "CH%d_STS          0x%08x  link=%u duplex=%u speed=%u\n",
+			   ch, v, !!(v & UNIPHY_CH_STS_LINK),
+			   !!(v & UNIPHY_CH_STS_DUPLEX),
+			   (unsigned int)FIELD_GET(UNIPHY_CH_STS_SPEED_MODE, v));
+	}
+
+	/*
+	 * Everything below is reached through the indirect AHB window into the
+	 * XPCS sub-block. On an instance that is not in XPCS mode - a PSGMII
+	 * instance driving the 1G ports, say - that block is held in reset and
+	 * the access takes an external abort that resets the SoC. Only touch it
+	 * once the mode register says it is there.
+	 */
+	if (!(mode_ctrl & UNIPHY_XPCS_MODE)) {
+		seq_puts(s, "XPCS             not enabled on this instance, skipped\n");
+		return 0;
+	}
+
+	/* Mode alone is not enough: the block can still be held in reset. */
+	if (reset_control_status(uniphy->rst_xpcs) > 0) {
+		seq_puts(s, "XPCS             held in reset, skipped\n");
+		return 0;
+	}
+
+	/*
+	 * Not read above: this is the one register here the driver never
+	 * touches in its normal paths, so keep it off an instance we have no
+	 * evidence is safe to probe.
+	 */
+	regmap_read(uniphy->regmap, UNIPHY_INSTANCE_LINK_DETECT, &v);
+	seq_printf(s, "LINK_DETECT      0x%08x  los_from_sfp=%u\n",
+		   v, (unsigned int)FIELD_GET(UNIPHY_DETECT_LOS_FROM_SFP, v));
+
+	regmap_read(uniphy->regmap, XPCS_KR_STS1, &v);
+	seq_printf(s, "XPCS_KR_STS1     0x%08x  block_lock=%u hiber=%u plu=%u\n",
+		   v, !!(v & XPCS_KR_STS1_RPCS_BKLK),
+		   !!(v & XPCS_KR_STS1_PRCS_HIBER), !!(v & XPCS_KR_STS1_PLU));
+
+	regmap_read(uniphy->regmap, XPCS_DIG_CTRL, &v);
+	seq_printf(s, "XPCS_DIG_CTRL    0x%08x  usxg_en=%u adpt_reset=%u soft_reset=%u\n",
+		   v, !!(v & XPCS_USXG_EN), !!(v & XPCS_USXG_ADPT_RESET),
+		   !!(v & XPCS_SOFT_RESET));
+
+	regmap_read(uniphy->regmap, XPCS_MII_CTRL, &v);
+	seq_printf(s, "XPCS_MII_CTRL    0x%08x  an_en=%u full_duplex=%u speed=%s\n",
+		   v, !!(v & XPCS_MII_AN_EN), !!(v & XPCS_DUPLEX_FULL),
+		   qca_uniphy_speed_name(v));
+
+	/*
+	 * An interrupt-status latch, not live state: it holds the last USXGMII
+	 * code word received from the PHY and nothing here ever clears it.
+	 */
+	regmap_read(uniphy->regmap, XPCS_MII_AN_INTR_STS, &v);
+	seq_printf(s, "XPCS_AN_INTR_STS 0x%08x  latched, link_sts=%u\n",
+		   v, !!(v & XPCS_USXG_AN_LINK_STS));
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(qca_uniphy_status);
+
+static void qca_uniphy_debugfs_remove(void *data)
+{
+	debugfs_remove_recursive(data);
+}
+
 static int qca_uniphy_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct clk_bulk_data *clks;
 	struct qca_uniphy *uniphy;
 	int ret, i, num_clks;
+	struct dentry *dir;
 
 	uniphy = devm_kzalloc(dev, sizeof(*uniphy), GFP_KERNEL);
 	if (!uniphy)
@@ -987,6 +1101,13 @@ static int qca_uniphy_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, uniphy);
+
+	dir = debugfs_create_dir(dev_name(dev), NULL);
+	debugfs_create_file("status", 0400, dir, uniphy,
+			    &qca_uniphy_status_fops);
+	ret = devm_add_action_or_reset(dev, qca_uniphy_debugfs_remove, dir);
+	if (ret)
+		return ret;
 
 	return fwnode_pcs_add_provider(dev_fwnode(dev), qca_uniphy_get,
 				       uniphy);
