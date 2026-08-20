@@ -361,7 +361,6 @@
 #define   PPE_FLOW_CTRL1_DIR_BITS	6
 #define   PPE_FLOW_MISS_ACTION		GENMASK(1, 0)
 #define   PPE_FLOW_FRAG_BYPASS		BIT(2)
-#define   PPE_FLOW_TCP_SPECIAL		BIT(3)
 #define   PPE_FLOW_ALL_BYPASS		BIT(4)
 #define   PPE_FLOW_KEY_SEL		BIT(5)
 
@@ -415,13 +414,16 @@
 #define   PPE_HOST_RSLT_VALID_CNT	GENMASK(21, 18)
 
 #define PPE_IN_L3_IF_TBL(i)		(PPE_L3_BASE + 0x2000 + (i) * 0x8)
+#define   PPE_L3_IF_WORDS		2
 #define   PPE_L3_IF_MRU			GENMASK(13, 0)
 #define   PPE_L3_IF_MTU			GENMASK(27, 14)
 #define   PPE_L3_IF_TTL_DEC_BYPASS	BIT(28)
 #define   PPE_L3_IF_IPV4_ROUTE_EN	BIT(29)
 #define   PPE_L3_IF_IPV6_ROUTE_EN	BIT(30)
 #define   PPE_L3_IF_ICMP_TRIGGER_EN	BIT(31)
+/* Second word of the entry. */
 #define   PPE_L3_IF_TTL_EXCEED_CMD	GENMASK(1, 0)
+#define     PPE_L3_IF_TTL_EXCEED_TO_CPU	3
 #define   PPE_L3_IF_TTL_EXCEED_DEACCEL	BIT(2)
 #define   PPE_L3_IF_MAC_BITMAP		GENMASK(10, 3)
 #define   PPE_L3_IF_PPPOE_EN		BIT(11)
@@ -452,6 +454,10 @@
 #define   PPE_FLOW_E_AGE_OFF		18
 #define   PPE_FLOW_E_AGE_LEN		2
 #define   PPE_FLOW_E_AGE_MASK		GENMASK(19, 18)
+#define   PPE_FLOW_E_SRC_IF_VALID_OFF	20
+#define   PPE_FLOW_E_SRC_IF_VALID_LEN	1
+#define   PPE_FLOW_E_SRC_IF_OFF		21
+#define   PPE_FLOW_E_SRC_IF_LEN		8
 #define   PPE_FLOW_E_FWD_TYPE_OFF	29
 #define   PPE_FLOW_E_FWD_TYPE_LEN	3
 #define   PPE_FLOW_E_NEXTHOP_OFF	32
@@ -469,6 +475,9 @@
 #define   PPE_FLOW_E_TYPE_IPV6		BIT(1)
 #define PPE_IN_NEXTHOP_TBL(i)		(PPE_L3_BASE + 0x60000 + (i) * 0x10)
 #define   PPE_NEXTHOP_WORDS		4
+#define   PPE_NEXTHOP_TYPE_OFF		0
+#define   PPE_NEXTHOP_TYPE_LEN		1
+#define   PPE_NEXTHOP_TYPE_PORT		1
 #define   PPE_NEXTHOP_PORT_OFF		1
 #define   PPE_NEXTHOP_PORT_LEN		8
 #define   PPE_NEXTHOP_POST_L3_IF_OFF	9
@@ -501,6 +510,7 @@
 #define PPE_IN_FLOW_CNT_TBL(i)		(PPE_POLICER_BASE + 0x20000 + (i) * 0x10)
 #define   PPE_FLOW_CNT_WORDS		3
 #define   PPE_FLOW_CNT_BYTES_HI		GENMASK(7, 0)
+#define   PPE_FLOW_CNT_BYTES		GENMASK_ULL(39, 0)
 #define PPE_RT_IF_CNT_TBL(i)		(PPE_POLICER_BASE + 0x40000 + (i) * 0x20)
 
 /* --- Traffic Manager (base 0x400000) --- */
@@ -699,6 +709,31 @@ struct ppe_data {
 	const struct bm_tdm_data *bm_tdm;
 };
 
+/* Why a flow was not offloaded. Counted so that "it stayed in software" can be
+ * answered without a kernel rebuild.
+ */
+enum ppe_flow_reject {
+	PPE_REJECT_INGRESS_PORT,
+	PPE_REJECT_INGRESS_VLAN,
+	PPE_REJECT_KEY,
+	PPE_REJECT_PROTO,
+	PPE_REJECT_ACTION,
+	PPE_REJECT_L2,
+	PPE_REJECT_EGRESS_PORT,
+	PPE_REJECT_HAIRPIN,
+	PPE_REJECT_NAT_BOTH,
+	PPE_REJECT_NAT_IPV6,
+	PPE_REJECT_RESOURCE,
+	PPE_REJECT_HW_OP,
+	PPE_REJECT_MAX,
+};
+
+/* One slot of a reference-counted hardware side table. */
+struct ppe_res {
+	u32 words[PPE_NEXTHOP_WORDS];
+	int refcount;
+};
+
 struct qca_ppe_bridge_vsi {
 	struct net_device *br_dev;
 	u32 vsi;
@@ -723,7 +758,25 @@ struct qca_ppe_priv {
 	int num_clks;
 	spinlock_t fdb_lock;
 	struct mutex flow_lock;
+	/* The VSI, translation-index and bridge-VLAN state is reached from the
+	 * switchdev ops under rtnl and from the flowtable's workqueue, which
+	 * holds none. Taken after flow_lock wherever both are needed.
+	 */
+	struct mutex vlan_lock;
 	u32 flow_cmd_id;
+	struct rhashtable flow_table;
+	struct list_head flow_list;
+	struct ppe_res *eg_l3_if;
+	struct ppe_res *pub_ip;
+	struct ppe_res *nexthop;
+	struct ppe_res *my_mac;
+	u16 *host_ref;
+	u16 l3_if_ref[PPE_VSI_MAX];
+	u32 flow_reject[PPE_REJECT_MAX];
+	u32 flow_offloaded;
+	u32 flow_reinstalled;
+	u32 flow_destroy_miss;
+	u32 flow_stale_ingress;
 	struct dentry *debugfs;
 	DECLARE_BITMAP(vsi_bitmap, PPE_VSI_MAX);
 	DECLARE_BITMAP(xlt_bitmap, PPE_XLT_TBL_NUM);
@@ -783,6 +836,9 @@ int ppe_vsi_alloc(struct qca_ppe_priv *priv);
 void ppe_vsi_free(struct qca_ppe_priv *priv, u32 vsi);
 void ppe_vsi_member_set(struct qca_ppe_priv *priv, u32 vsi, u32 portmask);
 
+struct qca_ppe_vlan_entry *ppe_vlan_find(struct qca_ppe_priv *priv,
+					 struct net_device *br_dev, u16 vid);
+
 int qca_ppe_vlan_setup(struct dsa_switch *ds);
 int qca_ppe_port_vlan_filtering(struct dsa_switch *ds, int port,
 				bool vlan_filtering,
@@ -807,5 +863,11 @@ int ppe_flow_entry_delete(struct qca_ppe_priv *priv, u32 index);
 void ppe_flow_debugfs_init(struct qca_ppe_priv *priv);
 void ppe_flow_debugfs_exit(struct qca_ppe_priv *priv);
 
+int qca_ppe_setup_tc(struct dsa_switch *ds, int port, enum tc_setup_type type,
+		     void *type_data);
+int ppe_flow_offload_init(struct qca_ppe_priv *priv);
+void ppe_flow_mtu_update(struct qca_ppe_priv *priv, int port, int mtu);
+void ppe_flow_purge_vsi(struct qca_ppe_priv *priv, u32 vsi);
+void ppe_flow_offload_exit(struct qca_ppe_priv *priv);
 
 #endif
