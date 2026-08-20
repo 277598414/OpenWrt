@@ -942,6 +942,7 @@ static inline struct qca_ppe_priv *ds_to_priv(struct dsa_switch *ds)
 }
 
 struct tc_tbf_qopt_offload;
+struct tc_ets_qopt_offload;
 
 void ppe_scheduler_init(struct qca_ppe_priv *priv);
 int qca_ppe_port_get_dscp_prio(struct dsa_switch *ds, int port, u8 dscp);
@@ -955,6 +956,8 @@ int qca_ppe_port_set_apptrust(struct dsa_switch *ds, int port, const u8 *sel,
 			      int nsel);
 int qca_ppe_setup_tc_tbf(struct qca_ppe_priv *priv, int port,
 			 struct tc_tbf_qopt_offload *qopt);
+int qca_ppe_setup_tc_ets(struct qca_ppe_priv *priv, int port,
+			 struct tc_ets_qopt_offload *qopt);
 int qca_ppe_port_policer_add(struct dsa_switch *ds, int port,
 			     struct dsa_mall_policer_tc_entry *policer);
 void qca_ppe_port_policer_del(struct dsa_switch *ds, int port);
