@@ -540,6 +540,27 @@
 #define   PPE_FLOW_CNT_BYTES		GENMASK_ULL(39, 0)
 #define PPE_RT_IF_CNT_TBL(i)		(PPE_POLICER_BASE + 0x40000 + (i) * 0x20)
 
+#define PPE_POLICER_TIME_SLOT		(PPE_POLICER_BASE + 0x40)
+#define   PPE_POLICER_SLOT_TIME		GENMASK(9, 0)
+
+#define PPE_PORT_METER_W0(p)		(PPE_POLICER_BASE + 0xc000 + (p) * 0x10)
+#define   PPE_METER_EN			BIT(0)
+#define   PPE_METER_FRAME_TYPE		GENMASK(6, 2)
+#define   PPE_METER_MODE		BIT(8)
+#define   PPE_METER_TOKEN_UNIT		GENMASK(11, 9)
+#define   PPE_METER_UNIT		BIT(12)
+#define   PPE_METER_CBS			GENMASK(28, 13)
+#define   PPE_METER_CIR_LO		GENMASK(31, 29)
+#define PPE_PORT_METER_W1(p)		(PPE_POLICER_BASE + 0xc000 + (p) * 0x10 + 0x4)
+#define   PPE_METER_CIR_HI		GENMASK(14, 0)
+#define PPE_PORT_METER_W2(p)		(PPE_POLICER_BASE + 0xc000 + (p) * 0x10 + 0x8)
+#define PPE_PORT_METER_W3(p)		(PPE_POLICER_BASE + 0xc000 + (p) * 0x10 + 0xc)
+
+#define PPE_PORT_TX_DROP_CNT(p)	(PPE_POLICER_BASE + 0x7d000 + (p) * 0x10)
+
+#define PPE_PORT_METER_CNT(p, c)	(PPE_POLICER_BASE + 0xe000 + \
+					 ((p) * 3 + (c)) * 0x10)
+
 /* --- Traffic Manager (base 0x400000) --- */
 #define PPE_TM_BASE			0x400000
 
@@ -908,6 +929,9 @@ struct tc_tbf_qopt_offload;
 void ppe_scheduler_init(struct qca_ppe_priv *priv);
 int qca_ppe_setup_tc_tbf(struct qca_ppe_priv *priv, int port,
 			 struct tc_tbf_qopt_offload *qopt);
+int qca_ppe_port_policer_add(struct dsa_switch *ds, int port,
+			     struct dsa_mall_policer_tc_entry *policer);
+void qca_ppe_port_policer_del(struct dsa_switch *ds, int port);
 
 int ppe_vsi_alloc(struct qca_ppe_priv *priv);
 void ppe_vsi_free(struct qca_ppe_priv *priv, u32 vsi);
