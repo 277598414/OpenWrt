@@ -5,7 +5,7 @@
 
 #include "qca_ppe.h"
 
-static int ppe_xlt_idx_alloc(struct qca_ppe_priv *priv)
+int ppe_xlt_idx_alloc(struct qca_ppe_priv *priv)
 {
 	int idx;
 
@@ -67,7 +67,7 @@ static void ppe_xlt_clear(struct qca_ppe_priv *priv, int idx)
 	regmap_write(priv->regmap, PPE_XLT_ACTION_W1(idx), 0);
 }
 
-static void ppe_xlt_idx_free(struct qca_ppe_priv *priv, int *idx)
+void ppe_xlt_idx_free(struct qca_ppe_priv *priv, int *idx)
 {
 	lockdep_assert_held(&priv->vlan_lock);
 

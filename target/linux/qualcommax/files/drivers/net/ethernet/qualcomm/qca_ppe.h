@@ -247,6 +247,24 @@
 #define PPE_EG_VSI_TAG(vsi)		(PPE_PTX_BASE + (vsi) * 0x4)
 #define   PPE_EG_VSI_TAG_UNMODIFIED	0xaaaa
 
+#define PPE_EG_XLT_RULE(idx)		(PPE_PTX_BASE + 0x200 + (idx) * 0x8)
+#define   PPE_EG_XLT_VALID		BIT(0)
+#define   PPE_EG_XLT_PORT_BMP		GENMASK(8, 1)
+#define   PPE_EG_XLT_VSI_INCL		BIT(9)
+#define   PPE_EG_XLT_VSI		GENMASK(14, 10)
+#define   PPE_EG_XLT_VSI_VALID		BIT(15)
+#define   PPE_EG_XLT_SKEY_FMT		GENMASK(18, 16)
+
+#define PPE_EG_XLT_RULE_W1(idx)		(PPE_PTX_BASE + 0x200 + (idx) * 0x8 + 0x4)
+#define   PPE_EG_XLT_CKEY_FMT		GENMASK(8, 6)
+
+#define PPE_EG_XLT_ACTION(idx)		(PPE_PTX_BASE + 0xd000 + (idx) * 0x8)
+#define   PPE_EG_XLT_CVID_CMD		GENMASK(16, 15)
+#define   PPE_EG_XLT_CVID		GENMASK(28, 17)
+#define   PPE_EG_XLT_CVID_ADD		1
+
+#define PPE_EG_XLT_ACTION_W1(idx)	(PPE_PTX_BASE + 0xd000 + (idx) * 0x8 + 0x4)
+
 #define PPE_EG_BRIDGE_CONFIG		(PPE_PTX_BASE + 0x6000)
 #define   PPE_EG_L2_EDIT_EN		BIT(1)
 #define   PPE_EG_QUEUE_CNT_EN		BIT(2)
@@ -335,6 +353,14 @@
 #define   PPE_L3_VP_VSI_VALID		BIT(9)
 #define   PPE_L3_VP_VSI		GENMASK(14, 10)
 
+#define PPE_PPPOE_SESSION(i)		(PPE_L3_BASE + 0xc20 + (i) * 0x4)
+#define   PPE_PPPOE_SESSION_ID		GENMASK(15, 0)
+#define   PPE_PPPOE_SESSION_PORT_BMP	GENMASK(23, 16)
+#define   PPE_PPPOE_SESSION_L3_IF	GENMASK(31, 24)
+#define PPE_PPPOE_SESSION_EXT(i)	(PPE_L3_BASE + 0xc60 + (i) * 0x4)
+#define   PPE_PPPOE_EXT_L3_IF_VALID	BIT(0)
+#define   PPE_PPPOE_EXT_UC_VALID	BIT(2)
+
 #define PPE_MY_MAC_TBL(i)		(PPE_L3_BASE + (i) * 0x8)
 #define   PPE_MY_MAC_ENTRIES		8
 #define   PPE_MY_MAC_WORDS		2
@@ -360,6 +386,7 @@
 #define   PPE_FLOW_CTRL1_DIRS		5
 #define   PPE_FLOW_CTRL1_DIR_BITS	6
 #define   PPE_FLOW_MISS_ACTION		GENMASK(1, 0)
+#define   PPE_FLOW_DIR_WAN_TO_LAN	2
 #define   PPE_FLOW_FRAG_BYPASS		BIT(2)
 #define   PPE_FLOW_ALL_BYPASS		BIT(4)
 #define   PPE_FLOW_KEY_SEL		BIT(5)
@@ -772,6 +799,14 @@ struct qca_ppe_priv {
 	struct ppe_res *my_mac;
 	u16 *host_ref;
 	u16 l3_if_ref[PPE_VSI_MAX];
+	/* A tagged PPPoE WAN port routes on its own VSI, separate from the L2
+	 * bridge, so its download direction reaches the flow lookup. Allocated
+	 * with the first offloaded flow on the port and shared by the rest.
+	 */
+	s8 wan_vsi[QCA_PPE_MAX_PORTS];
+	s8 wan_mymac[QCA_PPE_MAX_PORTS];
+	u16 wan_ref[QCA_PPE_MAX_PORTS];
+	int wan_xlt[QCA_PPE_MAX_PORTS];
 	u32 flow_reject[PPE_REJECT_MAX];
 	u32 flow_offloaded;
 	u32 flow_reinstalled;
@@ -836,6 +871,8 @@ int ppe_vsi_alloc(struct qca_ppe_priv *priv);
 void ppe_vsi_free(struct qca_ppe_priv *priv, u32 vsi);
 void ppe_vsi_member_set(struct qca_ppe_priv *priv, u32 vsi, u32 portmask);
 
+int ppe_xlt_idx_alloc(struct qca_ppe_priv *priv);
+void ppe_xlt_idx_free(struct qca_ppe_priv *priv, int *idx);
 struct qca_ppe_vlan_entry *ppe_vlan_find(struct qca_ppe_priv *priv,
 					 struct net_device *br_dev, u16 vid);
 

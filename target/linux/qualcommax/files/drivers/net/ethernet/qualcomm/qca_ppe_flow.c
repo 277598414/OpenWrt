@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/* Copyright (c) 2026 Julius Bairaktaris <julius@bairaktaris.de> */
 /* Routed and NAT flow offload for the Qualcomm PPE.
  *
  * The PPE matches a packet's 5-tuple against a hashed flow table and, on a hit,
  * forwards it in hardware. The key is split across two tables: the flow entry
  * carries the destination address, the L4 ports and the protocol, while the
  * source address lives in the host table and the flow entry only references its
- * index. Which of the two addresses goes where is a per-direction hardware
- * choice (PPE_FLOW_KEY_SEL); both directions are programmed the same way here,
- * so the driver never has to agree with the hardware's direction classifier.
+ * index. Which of the two addresses goes where when a packet is looked up is
+ * a per-direction hardware choice (PPE_FLOW_KEY_SEL); every entry is staged
+ * the same way here, and the one direction group that looks up with the
+ * opposite orientation - WAN-to-LAN, where tunnel-terminated ingress lands -
+ * gets its KEY_SEL flipped to match in ppe_flow_init().
  *
  * Entries are placed by the hardware hash rather than by the driver: an add
  * stages the entry in the op registers, and the hardware picks the slot, writes
@@ -373,6 +376,16 @@ void ppe_flow_init(struct qca_ppe_priv *priv)
 					   PPE_FLOW_MISS_FORWARD) |
 				PPE_FLOW_FRAG_BYPASS)
 			       << (dir * PPE_FLOW_CTRL1_DIR_BITS);
+
+		/* Tunnel-terminated ingress (a de-encapsulated PPPoE frame)
+		 * classifies as WAN-to-LAN regardless of the host entries,
+		 * and that direction group builds its lookup key with the
+		 * opposite orientation: without its KEY_SEL flipped, such
+		 * frames never find the entries this driver installs. All
+		 * other groups match the orientation entries are staged in.
+		 */
+		val |= PPE_FLOW_KEY_SEL
+		       << (PPE_FLOW_DIR_WAN_TO_LAN * PPE_FLOW_CTRL1_DIR_BITS);
 
 		regmap_write(priv->regmap, PPE_FLOW_CTRL1(type), val);
 	}
