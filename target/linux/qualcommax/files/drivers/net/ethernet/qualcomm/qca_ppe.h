@@ -165,6 +165,11 @@
 /* --- XGMAC (base 0x003000) --- */
 #define PPE_MAC_XGMAC_CSR_BASE		0x003000
 
+#define PPE_XGMAC_MIB_TX_BYTES(xgmac)	(PPE_MAC_XGMAC_CSR_BASE + \
+					 (xgmac) * 0x4000 + 0x814)
+#define PPE_XGMAC_MIB_TX_PKTS(xgmac)	(PPE_MAC_XGMAC_CSR_BASE + \
+					 (xgmac) * 0x4000 + 0x81c)
+
 #define PPE_XGMAC_TX_CONF(xgmac)	(PPE_MAC_XGMAC_CSR_BASE + (xgmac) * 0x4000)
 #define   PPE_XGMAC_TX_ENABLE		BIT(0)
 #define   PPE_XGMAC_JABBER_DISABLE	BIT(16) /* Called JD */
@@ -886,6 +891,7 @@ struct qca_ppe_priv {
 	 * bridge, so its download direction reaches the flow lookup. Allocated
 	 * with the first offloaded flow on the port and shared by the rest.
 	 */
+	bool port_is_xgmac[QCA_PPE_MAX_PORTS];
 	s8 mirror_port;
 	u16 mirror_ref;
 	u8 mirror_dir_ref[QCA_PPE_MAX_PORTS][2];

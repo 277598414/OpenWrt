@@ -26,6 +26,8 @@ static void ppe_port_gmac_set(struct qca_ppe_priv *priv, int port,
 	if (port < 1 || port >= priv->data->num_ports)
 		return;
 
+	priv->port_is_xgmac[port] = false;
+
 	if (tx_en)
 		val |= PPE_MAC_ENABLE_TXMAC_EN;
 	if (rx_en)
@@ -42,6 +44,8 @@ static void ppe_port_xgmac_set(struct qca_ppe_priv *priv, int port,
 
 	if (port < 5 || port >= priv->data->num_ports)
 		return;
+
+	priv->port_is_xgmac[port] = true;
 
 	regmap_update_bits(priv->regmap, PPE_XGMAC_TX_CONF(xgmac),
 			   PPE_XGMAC_TX_ENABLE,
