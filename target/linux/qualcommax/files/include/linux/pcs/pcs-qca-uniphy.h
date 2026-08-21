@@ -124,6 +124,7 @@ struct qca_uniphy_pcs {
 	struct qca_uniphy *uniphy;
 	int channel;
 	bool clks_enabled;
+	bool phylink_clks_enabled;
 };
 
 struct qca_uniphy_match_data {
