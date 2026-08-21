@@ -913,6 +913,16 @@ static void ppe_qos_init(struct qca_ppe_priv *priv)
 	for (i = 0; i < PPE_PCP_QOS_ENTRIES; i++)
 		regmap_write(priv->regmap, PPE_PCP_QOS_GROUP(0, i),
 			     FIELD_PREP(PPE_QOS_INFO_PRI, i & 7));
+
+	/* A flow entry names a profile, not a priority, so give the profiles
+	 * the identity mapping and let the entry carry the number itself.
+	 * Profile 0 is left at priority 0: it is what an entry given no
+	 * priority holds, and leaving it there is what lets DSCP still decide
+	 * those.
+	 */
+	for (i = 1; i <= PPE_QOS_MAX_PRI; i++)
+		regmap_write(priv->regmap, PPE_FLOW_QOS_GROUP(0, i),
+			     FIELD_PREP(PPE_QOS_INFO_PRI, i));
 }
 
 const struct psch_tdm_data cppe_psch_tdm_data = {

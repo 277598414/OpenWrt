@@ -348,6 +348,8 @@
 #define PPE_PCP_QOS_GROUP(g, pcp)	(PPE_L2_BASE + 0xb00 + (g) * 0x100 + \
 					 (pcp) * 0x4)
 #define PPE_PCP_QOS_ENTRIES		16
+#define PPE_FLOW_QOS_GROUP(g, prof)	(PPE_L2_BASE + 0xd00 + (g) * 0x100 + \
+					 (prof) * 0x4)
 #define PPE_DSCP_QOS_GROUP(g, dscp)	(PPE_L2_BASE + 0x2000 + (g) * 0x800 + \
 					 (dscp) * 0x10)
 #define   PPE_QOS_INFO_PCP		GENMASK(2, 0)
@@ -528,6 +530,8 @@
 #define   PPE_FLOW_E_DPORT_OFF		124
 #define   PPE_FLOW_E_DPORT_LEN		16
 #define   PPE_FLOW_E_IPV6_OFF		140
+#define   PPE_FLOW_E_PRI_PROFILE_OFF	63
+#define   PPE_FLOW_E_PRI_PROFILE_LEN	5
 
 #define   PPE_FLOW_E_TYPE_IPV6		BIT(1)
 #define PPE_IN_NEXTHOP_TBL(i)		(PPE_L3_BASE + 0x60000 + (i) * 0x10)
