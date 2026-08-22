@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
 
 #include <linux/math64.h>
+#include <linux/module.h>
 #include <net/dcbnl.h>
 #include <net/pkt_cls.h>
 
@@ -1640,6 +1641,98 @@ static void ppe_rate_limit_init(struct qca_ppe_priv *priv)
 		     FIELD_PREP(PPE_POLICER_SLOT_TIME, PPE_POLICER_SLOT));
 }
 
+/* Small packets jump the bulk queue. One ACL entry per IP family classifies
+ * every frame whose L3 length is at most small_pkt_len into internal priority
+ * small_pkt_prio, whose queue the scheduler serves past a standing bulk queue
+ * on a shaped port. Length is the one property the silicon can read that
+ * separates acks, handshakes, DNS, VoIP and game traffic from full-size bulk
+ * without any marking on the packet; the deep queue a shaper wants for
+ * throughput then costs its latency only to the bulk traffic inside it.
+ *
+ * The priority is capped at 7: the slots above sit on the port's second SP
+ * beside the multicast queues.
+ */
+static ushort ppe_small_pkt_len = 128;
+static ushort ppe_small_pkt_prio = 5;
+
+/* One PPE per SoC; the parameter store needs the instance back. */
+static struct qca_ppe_priv *ppe_acl_priv;
+
+static void ppe_acl_small_pkt_apply(struct qca_ppe_priv *priv)
+{
+	/* Even indices: a RANGE_EN rule may not sit at an odd one. */
+	static const struct { u8 index; bool v6; } ent[] = {
+		{ 0, false }, { 2, true },
+	};
+	u32 ports = GENMASK(priv->data->num_ports - 1, 0);
+	u32 w[PPE_ACL_ACTION_WORDS];
+	int i, j;
+
+	for (i = 0; i < ARRAY_SIZE(ent); i++) {
+		u32 rule = PPE_ACL_RULE(ent[i].index);
+		u32 mask = PPE_ACL_MASK(ent[i].index);
+		u32 act = PPE_ACL_ACTION(ent[i].index);
+
+		/* Disarm before edit: entries commit on their last word, so
+		 * the zeroed source bitmap lands before anything changes.
+		 */
+		for (j = 0; j < PPE_ACL_RULE_WORDS; j++)
+			regmap_write(priv->regmap, rule + j * 4, 0);
+		if (!ppe_small_pkt_len)
+			continue;
+
+		memset(w, 0, sizeof(w));
+		w[3] = PPE_ACL_PRI_CHANGE_EN |
+		       FIELD_PREP(PPE_ACL_PRI, ppe_small_pkt_prio);
+		for (j = 0; j < PPE_ACL_ACTION_WORDS; j++)
+			regmap_write(priv->regmap, act + j * 4, w[j]);
+
+		/* Range compare: min in the rule, max in the mask slot. */
+		memset(w, 0, sizeof(w));
+		w[0] = FIELD_PREP(PPE_ACL_L3_LEN, ppe_small_pkt_len);
+		w[1] = PPE_ACL_IS_IPV6;
+		for (j = 0; j < PPE_ACL_MASK_WORDS; j++)
+			regmap_write(priv->regmap, mask + j * 4, w[j]);
+
+		memset(w, 0, sizeof(w));
+		w[1] = FIELD_PREP(PPE_ACL_RULE_TYPE, PPE_ACL_TYPE_IPMISC) |
+		       PPE_ACL_RANGE_EN |
+		       (ent[i].v6 ? PPE_ACL_IS_IPV6 : 0) |
+		       FIELD_PREP(PPE_ACL_SRC_LO, ports & 0x7);
+		w[2] = FIELD_PREP(PPE_ACL_SRC_HI, ports >> 3);
+		for (j = 0; j < PPE_ACL_RULE_WORDS; j++)
+			regmap_write(priv->regmap, rule + j * 4, w[j]);
+	}
+}
+
+static int ppe_small_pkt_param_set(const char *val,
+				   const struct kernel_param *kp)
+{
+	int ret = param_set_ushort(val, kp);
+
+	if (ret)
+		return ret;
+	if (ppe_small_pkt_prio > 7)
+		ppe_small_pkt_prio = 7;
+	if (ppe_acl_priv)
+		ppe_acl_small_pkt_apply(ppe_acl_priv);
+	return 0;
+}
+
+static const struct kernel_param_ops ppe_small_pkt_param_ops = {
+	.set = ppe_small_pkt_param_set,
+	.get = param_get_ushort,
+};
+
+module_param_cb(small_pkt_len, &ppe_small_pkt_param_ops,
+		&ppe_small_pkt_len, 0644);
+MODULE_PARM_DESC(small_pkt_len,
+		 "Classify frames up to this L3 length into small_pkt_prio (0 disables)");
+module_param_cb(small_pkt_prio, &ppe_small_pkt_param_ops,
+		&ppe_small_pkt_prio, 0644);
+MODULE_PARM_DESC(small_pkt_prio,
+		 "Internal priority for small frames (0-7)");
+
 void ppe_scheduler_init(struct qca_ppe_priv *priv)
 {
 	ppe_tdm_init(priv);
@@ -1650,4 +1743,7 @@ void ppe_scheduler_init(struct qca_ppe_priv *priv)
 	ppe_edma_ring_map_init(priv);
 	ppe_qos_init(priv);
 	ppe_rate_limit_init(priv);
+
+	ppe_acl_priv = priv;
+	ppe_acl_small_pkt_apply(priv);
 }
