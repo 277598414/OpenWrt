@@ -25,7 +25,6 @@
 #include <net/flow_offload.h>
 #include <net/netfilter/nf_flow_table.h>
 #include <net/pkt_cls.h>
-#include <net/sch_generic.h>
 
 #include "qca_ppe.h"
 
@@ -753,25 +752,6 @@ static int ppe_flow_alloc_egress(struct qca_ppe_priv *priv,
 	if (port == iport)
 		return -EBUSY;
 
-	/* A software qdisc on the egress port is a policy this hardware cannot
-	 * honour: an offloaded packet never visits it. The software fastpath
-	 * does - it transmits through dev_queue_xmit() - so the flow stays
-	 * there and the qdisc keeps its authority. A qdisc the hardware itself
-	 * runs (the offloaded tbf) is not a reason to decline.
-	 */
-	{
-		struct net_device *pdev = dsa_to_port(&priv->ds, port)->user;
-		struct Qdisc *q;
-
-		rcu_read_lock();
-		q = rcu_dereference(netdev_get_tx_queue(pdev, 0)->qdisc);
-		if (q && q->enqueue && !(q->flags & TCQ_F_OFFLOADED)) {
-			rcu_read_unlock();
-			return -EPERM;
-		}
-		rcu_read_unlock();
-	}
-
 	mac = ether_addr_to_u64(data->eth.h_source);
 	ppe_entry_set(words, PPE_EG_L3_IF_MAC_OFF, PPE_EG_L3_IF_MAC_LEN, mac);
 	if (data->pppoe_valid) {
@@ -1222,7 +1202,6 @@ static int ppe_flow_offload_replace(struct ppe_flow_block *fb,
 	if (ret) {
 		priv->flow_reject[ret == -ENOSPC ? PPE_REJECT_RESOURCE :
 				  ret == -EBUSY ? PPE_REJECT_HAIRPIN :
-				  ret == -EPERM ? PPE_REJECT_SHAPED_EGRESS :
 				  PPE_REJECT_EGRESS_PORT]++;
 		goto err_ingress;
 	}
