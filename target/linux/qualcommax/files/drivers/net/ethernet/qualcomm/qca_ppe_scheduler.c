@@ -516,6 +516,13 @@ static void ppe_qm_init(struct qca_ppe_priv *priv)
 			u8 cls = min(pri / PPE_FLOW_SPREAD_QUEUES, 2) *
 				 (i ? PPE_FLOW_SPREAD_QUEUES : 1);
 
+			/* From PPE_QOS_SPARSE_PRI up: the fourth list, past
+			 * the three bands on a user port, the fourth queue on
+			 * the CPU port.
+			 */
+			if (pri >= PPE_QOS_SPARSE_PRI)
+				cls = i ? 3 * PPE_FLOW_SPREAD_QUEUES : 3;
+
 			if (i) {
 				regmap_write(priv->regmap,
 					     PPE_QM_UCAST_PRI_MAP(i * 16 + pri),
@@ -884,6 +891,27 @@ static void ppe_l0_scheduler_init(struct qca_ppe_priv *priv)
 			}
 		}
 
+		/* A fourth list, for the flows the driver finds sparse: the
+		 * port's remaining unicast queues, on the download band's node
+		 * one priority above it, so the band's shaper covers them and
+		 * the scheduler serves them first. The band's queues wrote
+		 * their ids in turn to one register that holds the last, so
+		 * the earlier ones are unreferenced, and the list takes one.
+		 */
+		for (j = 3 * PPE_FLOW_SPREAD_QUEUES; j < p->ucast_count; j++) {
+			struct l0_cfg c = {
+				.queue = p->ucast_base + j,
+				.port = p->port,
+				.sp = p->sp_base + 1,
+				.cpri = 1,
+				.cdrr = p->cdrr_base + 2 * PPE_FLOW_SPREAD_QUEUES,
+				.epri = 1,
+				.edrr = p->cdrr_base + 2 * PPE_FLOW_SPREAD_QUEUES,
+			};
+
+			ppe_l0_entry_write(priv, &c);
+		}
+
 		/* Which multicast queue the port floods a frame onto is the
 		 * frame's internal priority, clamped to the queues the port
 		 * has: left at reset every priority resolves to the first.
@@ -1158,6 +1186,8 @@ static void ppe_qos_init(struct qca_ppe_priv *priv)
 	for (i = 1; i <= PPE_QOS_MAX_PRI; i++)
 		regmap_write(priv->regmap, PPE_FLOW_QOS_GROUP(0, i),
 			     FIELD_PREP(PPE_QOS_INFO_PRI, i));
+	regmap_write(priv->regmap, PPE_FLOW_QOS_GROUP(0, PPE_QOS_SPARSE_PRI),
+		     FIELD_PREP(PPE_QOS_INFO_PRI, PPE_QOS_SPARSE_PRI));
 }
 
 const struct psch_tdm_data cppe_psch_tdm_data = {

@@ -569,6 +569,10 @@
  * scheduler cannot be told to rotate credit for two queues on one node.
  */
 #define PPE_QOS_MAX_PRI			11
+/* The internal priority of a flow the driver has found sparse: the list a
+ * port's scheduler serves ahead of its download band, on the band's node.
+ */
+#define PPE_QOS_SPARSE_PRI		12
 
 #define PPE_VSI_TBL(vsi)		(PPE_L2_BASE + 0x1800 + (vsi) * 0x10)
 #define   PPE_VSI_TBL_MEMBER		GENMASK(7, 0)
@@ -1295,6 +1299,8 @@ struct qca_ppe_priv {
 	u32 flow_reinstalled;
 	u32 flow_destroy_miss;
 	u32 flow_stale;
+	u32 flow_sparse_promoted;
+	u32 flow_sparse_demoted;
 	struct ppe_port_shaper shaper[QCA_PPE_MAX_PORTS];
 	struct dentry *debugfs;
 	DECLARE_BITMAP(vsi_bitmap, PPE_VSI_MAX);
@@ -1330,6 +1336,7 @@ struct qca_ppe_priv {
 	 */
 	spinlock_t mib_lock;
 	struct delayed_work mib_work;
+	struct delayed_work sparse_work;
 };
 
 extern const struct psch_tdm_data cppe_psch_tdm_data;
